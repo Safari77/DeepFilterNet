@@ -15,12 +15,12 @@ use pyo3::exceptions::{PyRuntimeError, PyStopIteration, PyValueError};
 use pyo3::prelude::*;
 
 #[pymodule]
-fn libdfdata(_py: Python, m: &PyModule) -> PyResult<()> {
+fn py_df_data(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<_FdDataLoader>()?;
     Ok(())
 }
 
-#[pyclass]
+#[pyclass(unsendable)]
 struct _FdDataLoader {
     loader: DataLoader,
     finished: bool,
@@ -57,16 +57,16 @@ struct _FdDataLoader {
 // }
 
 type FdBatch<'py> = (
-    &'py PyArray4<Complex32>, // speech
-    &'py PyArray4<Complex32>, // noisy
-    &'py PyArray4<f32>,       // feat_erb
-    &'py PyArray4<Complex32>, // feat_spec
-    &'py PyArray1<usize>,     // lengths
-    &'py PyArray1<usize>,     // max_freq
-    &'py PyArray1<i8>,        // snr
-    &'py PyArray1<i8>,        // gain
-    &'py PyArray1<f32>,       // Timings until each sample and the overall batch was ready
-    &'py PyArray1<usize>,     // clean ids
+    Bound<'py, PyArray4<Complex32>>, // speech
+    Bound<'py, PyArray4<Complex32>>, // noisy
+    Bound<'py, PyArray4<f32>>,       // feat_erb
+    Bound<'py, PyArray4<Complex32>>, // feat_spec
+    Bound<'py, PyArray1<usize>>,     // lengths
+    Bound<'py, PyArray1<usize>>,     // max_freq
+    Bound<'py, PyArray1<i8>>,        // snr
+    Bound<'py, PyArray1<i8>>,        // gain
+    Bound<'py, PyArray1<f32>>,       // Timings until each sample and the overall batch was ready
+    Bound<'py, PyArray1<usize>>,     // clean ids
 );
 
 #[pymethods]
@@ -223,7 +223,7 @@ impl _FdDataLoader {
         }
     }
 
-    fn get_batch<'py>(&'py mut self, py: Python<'py>) -> PyResult<FdBatch<'py>> {
+    fn get_batch<'py>(&mut self, py: Python<'py>) -> PyResult<FdBatch<'py>> {
         let t0 = Instant::now();
         if self.finished {
             return Err(PyStopIteration::new_err("Epoch finished"));

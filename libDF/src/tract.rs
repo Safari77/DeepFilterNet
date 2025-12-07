@@ -92,15 +92,12 @@ impl Default for DfParams {
 }
 
 #[derive(Clone)]
+#[derive(Default)]
 pub enum ReduceMask {
+    #[default]
     NONE = 0,
     MAX = 1,
     MEAN = 2,
-}
-impl Default for ReduceMask {
-    fn default() -> Self {
-        ReduceMask::NONE
-    }
 }
 impl TryFrom<i32> for ReduceMask {
     type Error = ();

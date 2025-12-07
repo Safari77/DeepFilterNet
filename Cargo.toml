@@ -3,8 +3,8 @@ resolver = "2"
 
 members = [
   "libDF",
-#  "pyDF",
-#  "pyDF-data",
+  "pyDF",
+  "pyDF-data",
   "ladspa",
 #  "demo",
 ]
