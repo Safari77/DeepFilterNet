@@ -66,7 +66,14 @@ struct DfPlugin {
 
 const ID_MONO: u64 = 7843795;
 const ID_STEREO: u64 = 7843796;
-static mut MODEL: Option<DfTract> = None;
+static MODEL: Mutex<Option<ModelWrapper>> = Mutex::new(None);
+
+// Wrapper to silence Send/Sync errors. 
+// We must protect this with a Mutex at runtime to be actually safe!
+struct ModelWrapper(DfTract);
+
+unsafe impl Send for ModelWrapper {}
+unsafe impl Sync for ModelWrapper {}
 
 fn log_format(buf: &mut env_logger::fmt::Formatter, record: &log::Record) -> io::Result<()> {
     let ts = buf.timestamp_millis();
@@ -75,13 +82,18 @@ fn log_format(buf: &mut env_logger::fmt::Formatter, record: &log::Record) -> io:
     } else {
         "".to_string()
     };
+
+    // Forcing the style to always be INFO color.
+    // If you want it to adapt to the record level, change `log::Level::Info` to `record.level()`
     let level_style = buf.default_level_style(log::Level::Info);
 
     writeln!(
         buf,
-        "{} | {} | {} {}",
+        "{} | {}{}{:#} | {} {}", // Changed format string
         ts,
-        level_style.value(record.level()),
+        level_style,       // 1. Writes ANSI color code
+        record.level(),    // 2. Writes the actual text (e.g. "INFO")
+        level_style,       // 3. Writes ANSI Reset code (triggered by the :# flag)
         module,
         record.args()
     )
@@ -111,7 +123,11 @@ fn get_worker_fn(
     id: String,
 ) -> impl FnMut() {
     move || {
-        let mut df = unsafe { MODEL.clone().unwrap() };
+        let mut df = {
+            let guard = MODEL.lock().unwrap();
+            // We expect it to be initialized by now, so unwrap is safe-ish
+            guard.as_ref().expect("Model not initialized").0.clone()
+        };
         let mut inframe = Array2::zeros((df.ch, df.hop_size));
         let mut outframe = Array2::zeros((df.ch, df.hop_size));
         let t_audio_ms = df.hop_size as f32 / df.sr as f32 * 1000.;
@@ -169,22 +185,34 @@ fn get_worker_fn(
     }
 }
 
-/// Initialize DF model and returns sample rate and frame size
 fn init_df(channels: usize) -> (usize, usize) {
-    unsafe {
-        if let Some(m) = MODEL.as_ref() {
-            if m.ch == channels {
-                return (m.sr, m.hop_size);
-            }
+    // 1. Lock the global mutex immediately
+    let mut guard = MODEL.lock().unwrap();
+
+    // 2. Check if a model exists and matches our needs
+    if let Some(wrapper) = guard.as_ref() {
+        let m = &wrapper.0;
+        if m.ch == channels {
+            return (m.sr, m.hop_size);
         }
+        // If channels don't match, we fall through to create a new one.
+        // The guard is still held, so we are safe to replace it.
+        eprintln!("DeepFilterNet: Re-initializing model for {} channels", channels);
     }
 
+    // 3. Create the new model
     let df_params = DfParams::default();
     let r_params = RuntimeParams::default_with_ch(channels);
-    let df = DfTract::new(df_params, &r_params).expect("Could not initialize DeepFilter runtime");
-    let (sr, frame_size) = (df.sr, df.hop_size);
-    unsafe { MODEL = Some(df) };
-    (sr, frame_size)
+    let df = DfTract::new(df_params, &r_params)
+        .expect("Could not initialize DeepFilter runtime");
+
+    let sr = df.sr;
+    let hop_size = df.hop_size;
+
+    // 4. Overwrite the existing model with the new one
+    *guard = Some(ModelWrapper(df));
+
+    (sr, hop_size)
 }
 
 fn get_new_df(channels: usize) -> impl Fn(&PluginDescriptor, u64) -> DfPlugin {

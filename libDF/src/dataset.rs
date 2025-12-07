@@ -1704,7 +1704,7 @@ impl Hdf5Dataset {
             1 => {
                 // Return in channels first
                 let len = x.len_of(Axis(0));
-                x.into_shape((1, len))?
+                x.into_shape_with_order((1, len))?
             }
             2 => match ch_idx {
                 Some(-1) => {
@@ -2321,8 +2321,8 @@ mod tests {
         seed_from_u64(0);
         let sr = 48_000;
         let n = sr;
-        let clean = arr1(rng_uniform(n, -0.1, 0.1)?.as_slice()).into_shape([1, n])?;
-        let noise = arr1(rng_uniform(n, -0.1, 0.1)?.as_slice()).into_shape([1, n])?;
+        let clean = arr1(rng_uniform(n, -0.1, 0.1)?.as_slice()).into_shape_with_order([1, n])?;
+        let noise = arr1(rng_uniform(n, -0.1, 0.1)?.as_slice()).into_shape_with_order([1, n])?;
         let gains = [-6., 0., 6.];
         let snrs = [-10., -5., 0., 5., 10., 20., 40.];
         let atol = 1e-4;

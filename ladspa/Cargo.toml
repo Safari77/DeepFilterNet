@@ -19,10 +19,11 @@ deep_filter = { path = "../libDF", default-features = false, features = [
   "use-jemalloc",
   "default-model",
 ] }
-ladspa = "0.3.4"
-ndarray = "^0.15"
-env_logger = "0.10"
+ladspa = { git = "https://github.com/Safari77/ladspa.rs", rev = "1df75684aa7f6f2b45ca6215d1eb314f20e6400a" }
+
+ndarray = "0.16"
+env_logger = "0.11"
 uuid = { version = "1.2.1", features = ["v4", "fast-rng"] }
 log = { version = "0.4", features = ["std"] }
-zbus = { version = "3.6", optional = true }
-event-listener = { version = "2.5", optional = true }
+zbus = { version = "5", optional = true }
+event-listener = { version = "5", optional = true }

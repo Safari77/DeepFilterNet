@@ -166,7 +166,7 @@ fn libdf(_py: Python, m: &PyModule) -> PyResult<()> {
             }
         };
         let input: ArrayView4<Complex32> = input
-            .into_shape((bs, ch, t, f))
+            .into_shape_with_order((bs, ch, t, f))
             .to_py_err()?
             .into_dimensionality()
             .to_py_err()?;
@@ -177,12 +177,12 @@ fn libdf(_py: Python, m: &PyModule) -> PyResult<()> {
         }
         let output: ArrayD<f32> = match indim {
             2 => output
-                .into_shape((t, erb_fb.len()))
+                .into_shape_with_order((t, erb_fb.len()))
                 .to_py_err()?
                 .into_dimensionality()
                 .to_py_err()?,
             3 => output
-                .into_shape((ch, t, erb_fb.len()))
+                .into_shape_with_order((ch, t, erb_fb.len()))
                 .to_py_err()?
                 .into_dimensionality()
                 .to_py_err()?,
@@ -224,7 +224,7 @@ fn libdf(_py: Python, m: &PyModule) -> PyResult<()> {
             }
         };
         let input: ArrayView4<f32> = input
-            .into_shape((bs, ch, t, e))
+            .into_shape_with_order((bs, ch, t, e))
             .to_py_err()?
             .into_dimensionality()
             .to_py_err()?;
@@ -235,12 +235,12 @@ fn libdf(_py: Python, m: &PyModule) -> PyResult<()> {
         }
         let output: ArrayD<f32> = match indim {
             2 => output
-                .into_shape((t, freq_size))
+                .into_shape_with_order((t, freq_size))
                 .to_py_err()?
                 .into_dimensionality()
                 .to_py_err()?,
             3 => output
-                .into_shape((ch, t, freq_size))
+                .into_shape_with_order((ch, t, freq_size))
                 .to_py_err()?
                 .into_dimensionality()
                 .to_py_err()?,
@@ -301,7 +301,7 @@ fn libdf(_py: Python, m: &PyModule) -> PyResult<()> {
     #[pyo3(name = "unit_norm_init")]
     fn unit_norm_init(py: Python, num_freq_bins: usize) -> PyResult<&PyArray2<f32>> {
         let arr = Array1::<f32>::linspace(UNIT_NORM_INIT[0], UNIT_NORM_INIT[1], num_freq_bins)
-            .into_shape([1, num_freq_bins])
+            .into_shape_with_order([1, num_freq_bins])
             .to_py_err()?;
         Ok(arr.into_pyarray(py))
     }

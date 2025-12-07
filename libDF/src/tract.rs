@@ -462,7 +462,15 @@ impl DfTract {
             TValue::from(self.cplx_buf.clone().into_tensor().permute_axes(&[0, 3, 1, 2])?)
         ))?;
 
-        let &lsnr = enc_emb.pop().unwrap().to_scalar::<f32>()?;
+        // Avoid panic in to_scalar if it sees more than one number
+        let lsnr_tensor = enc_emb.pop().unwrap();
+        let lsnr = if lsnr_tensor.len() == 1 {
+            *lsnr_tensor.to_scalar::<f32>()?
+        } else {
+            // If Stereo, average the SNR of both channels
+            let slice = lsnr_tensor.as_slice::<f32>()?;
+            slice.iter().sum::<f32>() / slice.len() as f32
+        };
         let c0 = enc_emb.pop().unwrap();
         let emb = enc_emb.pop().unwrap();
 
@@ -673,7 +681,7 @@ impl DfTract {
 
     pub fn set_spec_buffer(&mut self, spec: ArrayView2<f32>) -> Result<()> {
         debug_assert_eq!(self.spec_buf.shape(), spec.shape());
-        let mut buf = self.spec_buf.to_array_view_mut()?.into_shape([self.ch, self.n_freqs])?;
+        let mut buf = self.spec_buf.to_array_view_mut()?.into_shape_with_order([self.ch, self.n_freqs])?;
         for (i_ch, mut b_ch) in spec.outer_iter().zip(buf.outer_iter_mut()) {
             for (&i, b) in i_ch.iter().zip(b_ch.iter_mut()) {
                 *b = i
@@ -682,7 +690,7 @@ impl DfTract {
         Ok(())
     }
 
-    pub fn get_spec_noisy(&self) -> ArrayView2<Complex32> {
+    pub fn get_spec_noisy(&self) -> ArrayView2<'_, Complex32> {
         as_arrayview_complex(
             self.rolling_spec_buf_x
                 .get(self.lookahead.max(self.df_order) - self.lookahead - 1)
@@ -694,7 +702,7 @@ impl DfTract {
         .into_dimensionality::<Ix2>()
         .unwrap()
     }
-    pub fn get_spec_enh(&self) -> ArrayView2<Complex32> {
+    pub fn get_spec_enh(&self) -> ArrayView2<'_, Complex32> {
         as_arrayview_complex(
             self.spec_buf.to_array_view::<f32>().unwrap(),
             &[self.ch, self.n_freqs],
@@ -702,7 +710,7 @@ impl DfTract {
         .into_dimensionality::<Ix2>()
         .unwrap()
     }
-    pub fn get_mut_spec_enh(&mut self) -> ArrayViewMut2<Complex32> {
+    pub fn get_mut_spec_enh(&mut self) -> ArrayViewMut2<'_, Complex32> {
         as_arrayview_mut_complex(
             self.spec_buf.to_array_view_mut::<f32>().unwrap(),
             &[self.ch, self.n_freqs],
@@ -772,7 +780,7 @@ fn init_encoder_impl(
     n_ch: usize,
 ) -> Result<TypedModel> {
     log::debug!("Start init encoder.");
-    let s = m.symbol_table.sym("S");
+    let s = m.symbols.sym("S");
 
     let nb_erb = df_cfg.get("nb_erb").unwrap().parse::<usize>()?;
     let nb_df = df_cfg.get("nb_df").unwrap().parse::<usize>()?;
@@ -821,7 +829,7 @@ fn init_erb_decoder_impl(
     mask_reduction: Option<ReduceMask>,
 ) -> Result<TypedModel> {
     log::debug!("Start init ERB decoder.");
-    let s = m.symbol_table.sym("S");
+    let s = m.symbols.sym("S");
 
     let nb_erb = df_cfg.get("nb_erb").unwrap().parse::<usize>()?;
     let layer_width = net_cfg.get("conv_ch").unwrap().parse::<usize>()?;
@@ -934,7 +942,7 @@ fn init_df_decoder_impl(
     n_ch: usize,
 ) -> Result<TypedModel> {
     log::debug!("Start init DF decoder.");
-    let s = m.symbol_table.sym("S");
+    let s = m.symbols.sym("S");
 
     let nb_erb = df_cfg.get("nb_erb").unwrap().parse::<usize>()?;
     let nb_df = df_cfg.get("nb_df").unwrap().parse::<usize>()?;
@@ -1066,7 +1074,7 @@ pub fn as_arrayview_mut_complex<'a>(
         ArrayViewMutD::from_shape_ptr(shape, ptr)
     }
 }
-pub fn tvalue_to_array_view_mut(x: &mut TValue) -> ArrayViewMutD<f32> {
+pub fn tvalue_to_array_view_mut(x: &mut TValue) -> ArrayViewMutD<'_, f32> {
     unsafe {
         match x {
             TValue::Var(x) => {

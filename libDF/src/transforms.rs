@@ -308,7 +308,7 @@ pub fn erb_norm(
     let mut state = state.unwrap_or_else(|| {
         let b = input.len_of(Axis(2));
         let state_ch0 = Array1::<f32>::linspace(MEAN_NORM_INIT[0], MEAN_NORM_INIT[1], b)
-            .into_shape([1, b])
+            .into_shape_with_order([1, b])
             .unwrap();
         let mut state = state_ch0.clone();
         for _ in 1..input.len_of(Axis(0)) {
@@ -339,7 +339,7 @@ pub fn unit_norm(
     let mut state = state.unwrap_or_else(|| {
         let f = input.len_of(Axis(2));
         let state_ch0 = Array1::<f32>::linspace(UNIT_NORM_INIT[0], UNIT_NORM_INIT[1], f)
-            .into_shape([1, f])
+            .into_shape_with_order([1, f])
             .unwrap();
         let mut state = state_ch0.clone();
         for _ in 1..input.len_of(Axis(0)) {
@@ -502,7 +502,7 @@ fn bw_filterbank(center_freqs: &[f32], cutoff_bins: &[f32; 8]) -> Result<Array2<
             o[7] += 1.
         }
     }
-    let sum = out.sum_axis(Axis(0)).into_shape((1, 8))?;
+    let sum = out.sum_axis(Axis(0)).into_shape_with_order((1, 8))?;
     Ok(out / sum)
 }
 
