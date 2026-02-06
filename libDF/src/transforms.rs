@@ -1,7 +1,8 @@
 use std::mem::MaybeUninit;
 
-use ndarray::{prelude::*, Slice};
-use rubato::{FftFixedInOut, Resampler};
+use audioadapter_buffers::direct::SequentialSliceOfVecs;
+use ndarray::{prelude::*, Array2, ArrayView2, Axis, Slice};
+use rubato::{Fft, FixedSync, Resampler};
 use thiserror::Error;
 
 use crate::*;
@@ -372,6 +373,7 @@ pub(crate) fn low_pass_resample(
     x.slice_axis_inplace(Axis(1), Slice::from(0..orig_len));
     Ok(x)
 }
+
 /// Resample using a synchronous resample from rubato
 pub fn resample(
     x: ArrayView2<f32>,
@@ -383,16 +385,28 @@ pub fn resample(
     let len = x.len_of(Axis(1));
     let out_len = (len as f32 * new_sr as f32 / sr as f32).ceil() as usize;
     let chunk_size = chunk_size.unwrap_or(2048);
-    let mut resampler = FftFixedInOut::<f32>::new(sr, new_sr, chunk_size, channels)
-        .expect("Could not initialize resampler");
+
+    // 1. Initialize
+    // 'new' returns ResamplerConstructionError. TransformError can't wrap this.
+    // Since this is a static config error, we panic with expect() if it fails.
+    let mut resampler = Fft::<f32>::new(sr, new_sr, chunk_size, 2, channels, FixedSync::Both)
+        .expect("Failed to initialize resampler with provided sample rates");
+
     let chunk_size = resampler.input_frames_max();
-    // One extra to get the remaining resampler state buffer
     let num_chunks = (len as f32 / chunk_size as f32).ceil() as usize + 1;
     let chunk_size_out = resampler.output_frames_max();
+
+    // 2. Allocate
+    let in_frames = resampler.input_frames_max();
+    let mut inbuf: Vec<Vec<f32>> = vec![vec![0.0f32; in_frames]; channels];
+
+    let out_frames = resampler.output_frames_max();
+    let mut outbuf: Vec<Vec<f32>> = vec![vec![0.0f32; out_frames]; channels];
+
     let mut out = Array2::uninit((channels, chunk_size_out * num_chunks));
-    let mut inbuf = resampler.input_buffer_allocate(true);
-    let mut outbuf = resampler.output_buffer_allocate(true);
     let mut out_chunk_iter = out.axis_chunks_iter_mut(Axis(1), chunk_size_out);
+
+    // 3. Process
     for chunk in x.axis_chunks_iter(Axis(1), chunk_size) {
         for (chunk_ch, buf_ch) in chunk.axis_iter(Axis(0)).zip(inbuf.iter_mut()) {
             if chunk_ch.len() == chunk_size {
@@ -400,11 +414,18 @@ pub fn resample(
             } else {
                 chunk_ch.assign_to(&mut buf_ch[..chunk_ch.len()]);
                 for b in buf_ch[chunk_ch.len()..].iter_mut() {
-                    *b = 0. // Zero pad
+                    *b = 0.0;
                 }
             }
         }
-        resampler.process_into_buffer(&inbuf, &mut outbuf, None)?;
+
+        // Wrapper: Unwrap is safe here because we created vectors of exact size 'in_frames' above.
+        let in_wrap = SequentialSliceOfVecs::new(&inbuf, channels, in_frames).unwrap();
+        let mut out_wrap =
+            SequentialSliceOfVecs::new_mut(&mut outbuf, channels, out_frames).unwrap();
+
+        resampler.process_into_buffer(&in_wrap, &mut out_wrap, None)?;
+
         for (res_ch, mut out_ch) in
             outbuf.iter().zip(out_chunk_iter.next().unwrap().axis_iter_mut(Axis(0)))
         {
@@ -414,11 +435,17 @@ pub fn resample(
             }
         }
     }
-    // Another round with zeros to get remaining state buffer
+
+    // 4. Flush
     for in_ch in inbuf.iter_mut() {
-        in_ch.fill(0.)
+        in_ch.fill(0.);
     }
-    resampler.process_into_buffer(&inbuf, &mut outbuf, None)?;
+
+    let in_wrap = SequentialSliceOfVecs::new(&inbuf, channels, in_frames).unwrap();
+    let mut out_wrap = SequentialSliceOfVecs::new_mut(&mut outbuf, channels, out_frames).unwrap();
+
+    resampler.process_into_buffer(&in_wrap, &mut out_wrap, None)?;
+
     for (res_ch, mut out_ch) in
         outbuf.iter().zip(out_chunk_iter.next().unwrap().axis_iter_mut(Axis(0)))
     {
@@ -427,11 +454,13 @@ pub fn resample(
             *y = MaybeUninit::new(x);
         }
     }
+
     let mut out = unsafe { out.assume_init() };
     out.slice_axis_inplace(
         Axis(1),
         Slice::from(chunk_size_out / 2..chunk_size_out / 2 + out_len),
     );
+
     Ok(out)
 }
 
