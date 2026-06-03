@@ -26,6 +26,7 @@ use hdf5::{types::VarLenUnicode, File};
 use ndarray::concatenate;
 use ndarray::{prelude::*, Slice};
 use ndarray_rand::rand::prelude::{IteratorRandom, SliceRandom};
+use ndarray_rand::rand::seq::IndexedRandom;
 use rayon::prelude::*;
 use realfft::num_traits::Zero;
 use serde::{Deserialize, Serialize};
@@ -1462,8 +1463,7 @@ impl fmt::Display for DsType {
         write!(f, "{self:?}")
     }
 }
-#[derive(Debug, Clone, Eq, PartialEq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Eq, PartialEq, Default)]
 pub enum Codec {
     #[default]
     PCM = 0,
@@ -1999,7 +1999,8 @@ fn combine_noises(
     // Adjust number of noise channels to clean channels
     for ns in noises.iter_mut() {
         while ns.len_of(Axis(0)) > ch {
-            ns.remove_index(Axis(0), rng.uniform(0, ns.len_of(Axis(0))))
+            let r = rng.uniform(0, ns.len_of(Axis(0)));
+            ns.remove_index(Axis(0), r)
         }
         while ns.len_of(Axis(0)) < ch {
             let r = rng.uniform(0, ns.len_of(Axis(0)));

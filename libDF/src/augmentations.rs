@@ -4,7 +4,7 @@ use std::ops::Range;
 use std::time::Instant;
 
 use ndarray::{concatenate, prelude::*, Slice};
-use ndarray_rand::rand::{prelude::IteratorRandom, seq::SliceRandom, Rng};
+use ndarray_rand::rand::{prelude::IteratorRandom, Rng};
 use ndarray_rand::{rand_distr::Normal, rand_distr::Uniform, RandomExt};
 use thiserror::Error;
 
@@ -140,7 +140,7 @@ pub struct RandLFilt {
 }
 impl RandLFilt {
     pub fn new(p: f32, a: f32, b: f32) -> Self {
-        let uniform = Uniform::new_inclusive(a, b);
+        let uniform = Uniform::new_inclusive(a, b).expect("RandLFilt: invalid uniform bounds");
         RandLFilt { prob: p, uniform }
     }
     fn sample_ab(&self) -> Result<[f32; 2]> {
@@ -346,7 +346,7 @@ impl Transform for RandBiquadFilter {
         }
         let rms = x.map(|&x| x.powi(2)).mean().unwrap().sqrt();
         for _ in 0..rng.uniform_inclusive(1, self.n_freqs) {
-            let filter = self.filters.choose(&mut rng).unwrap();
+            let filter = *self.filters.iter().choose(&mut rng).unwrap();
             let (f_low, f_high) = match filter {
                 LowPass => (4000, 8000),
                 HighShelf => (1000, 8000),
@@ -357,7 +357,7 @@ impl Transform for RandBiquadFilter {
             let freq = rng.log_uniform(f_low as f32, f_high as f32);
             let gain_db = rng.uniform_inclusive(self.gain_db_low, self.gain_db_high);
             let q = rng.uniform_inclusive(self.q_low, self.q_high);
-            self.apply(x, *filter, freq, q, Some(gain_db));
+            self.apply(x, filter, freq, q, Some(gain_db));
         }
         if self.equalize_rms {
             let rms_new = x.map(|&x| x.powi(2)).mean().unwrap().sqrt();

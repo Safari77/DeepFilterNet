@@ -2,12 +2,16 @@ use std::cell::{RefCell, UnsafeCell};
 use std::rc::Rc;
 use std::thread_local;
 
-use ndarray_rand::rand::distributions::{
+use ndarray_rand::rand::distr::{
     uniform::{SampleUniform, Uniform},
     Distribution,
 };
-use ndarray_rand::rand::{Error as RandError, Rng, RngCore};
+use ndarray_rand::rand::{Rng, RngCore};
 use rand_xoshiro::rand_core::SeedableRng;
+// rand_xoshiro 0.8 uses rand_core 0.10, where next_u32/next_u64/fill_bytes live on
+// the `Rng` trait. Import it anonymously to bring those methods into scope without
+// clashing with rand 0.9's `Rng` (imported above via ndarray_rand::rand).
+use rand_xoshiro::rand_core::Rng as _;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use thiserror::Error;
 
@@ -21,6 +25,8 @@ pub enum UtilsError {
     SeedNotInitialized,
     #[error("Could not inititalize logger")]
     SetLoggerError(#[from] log::SetLoggerError),
+    #[error("Could not create uniform distribution")]
+    UniformError(#[from] ndarray_rand::rand::distr::uniform::Error),
 }
 
 pub struct SeededRng {
@@ -47,9 +53,6 @@ impl RngCore for SeededRng {
     fn fill_bytes(&mut self, slice: &mut [u8]) {
         unsafe { (*self.rng.get()).fill_bytes(slice) }
     }
-    fn try_fill_bytes(&mut self, slice: &mut [u8]) -> std::result::Result<(), RandError> {
-        unsafe { (*self.rng.get()).try_fill_bytes(slice) }
-    }
 }
 
 pub fn thread_rng() -> Result<SeededRng> {
@@ -64,14 +67,14 @@ pub fn thread_rng() -> Result<SeededRng> {
 impl SeededRng {
     #[inline]
     pub fn log_uniform(&mut self, low: f32, high: f32) -> f32 {
-        self.gen_range(low.ln()..=high.ln()).exp()
+        self.random_range(low.ln()..=high.ln()).exp()
     }
     #[inline]
     pub fn uniform<T: SampleUniform + PartialOrd>(&mut self, low: T, high: T) -> T {
         if low >= high {
             low
         } else {
-            self.gen_range(low..high)
+            self.random_range(low..high)
         }
     }
     #[inline]
@@ -79,7 +82,7 @@ impl SeededRng {
         if low >= high {
             low
         } else {
-            self.gen_range(low..=high)
+            self.random_range(low..=high)
         }
     }
 }
@@ -90,7 +93,7 @@ where
 {
     let mut rng = thread_rng()?;
     let mut v = vec![T::default(); n];
-    let dist = Uniform::new_inclusive(low, high);
+    let dist = Uniform::new_inclusive(low, high)?;
     for x in v.iter_mut() {
         *x = dist.sample(&mut rng);
     }

@@ -21,9 +21,9 @@ deep_filter = { path = "../libDF", default-features = false, features = [
 ] }
 ladspa = { git = "https://github.com/Safari77/ladspa.rs", rev = "1df75684aa7f6f2b45ca6215d1eb314f20e6400a" }
 
-ndarray = "0.16"
+ndarray = "0.17"
 env_logger = "0.11"
-uuid = { version = "1.2.1", features = ["v4", "fast-rng"] }
+uuid = { version = "1", features = ["v4", "fast-rng"] }
 log = { version = "0.4", features = ["std"] }
 zbus = { version = "5", optional = true }
 event-listener = { version = "5", optional = true }
