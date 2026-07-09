@@ -26,12 +26,12 @@ impl DFState {
         };
         let mut r_params = RuntimeParams::default_with_ch(channels); //channel
         r_params = r_params.with_atten_lim(atten_lim).with_thresholds(
-            -15.0f32,  //min_db_thresh
-            35.0f32,   //max_db_erb_thresh
-            35.0f32,   //max_db_df_thresh
+            -15.0f32, //min_db_thresh
+            35.0f32,  //max_db_erb_thresh
+            35.0f32,  //max_db_df_thresh
         );
-        r_params = r_params.with_post_filter(0.0f32);  //post_filter_beta
-        r_params = r_params.with_mask_reduce(ReduceMask::MAX);  //reduce_mask
+        r_params = r_params.with_post_filter(0.0f32); //post_filter_beta
+        r_params = r_params.with_mask_reduce(ReduceMask::MAX); //reduce_mask
         let df_params =
             DfParams::new(PathBuf::from(model_path)).expect("Could not load model from path");
         let m =
@@ -199,12 +199,12 @@ pub unsafe extern "C" fn df_process_frame_raw(
     let mut out_coefs =
         ArrayViewMut4::from_shape_ptr((1, state.m.df_order, state.m.nb_df, 2), *out_coefs_p);
     if let Some(gains) = gains {
-        out_gains.assign(&gains.to_array_view().unwrap());
+        out_gains.assign(&gains.to_plain_array_view().unwrap());
     } else {
         *out_gains_p = std::ptr::null_mut();
     }
     if let Some(coefs) = coefs {
-        out_coefs.assign(&coefs.to_array_view().unwrap());
+        out_coefs.assign(&coefs.to_plain_array_view().unwrap());
     } else {
         *out_coefs_p = std::ptr::null_mut();
     }

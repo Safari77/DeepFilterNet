@@ -11,8 +11,8 @@ use ndarray::{prelude::*, Axis};
 use tar::Archive;
 use tract_core::internal::tract_itertools::izip;
 use tract_core::internal::tract_smallvec::alloc::collections::VecDeque;
-use tract_core::internal::SimpleState;
 use tract_core::ops;
+use tract_core::plan::SimpleState;
 use tract_core::prelude::*;
 use tract_onnx::{prelude::*, tract_hir::shapefactoid};
 use tract_pulse::{internal::ToDim, model::*};
@@ -189,7 +189,7 @@ impl Default for RuntimeParams {
     }
 }
 
-pub type TractModel = TypedSimpleState;
+pub type TractModel = SimpleState<TypedFact, Box<dyn TypedOp>>;
 
 #[derive(Clone)]
 pub struct DfTract {
@@ -254,9 +254,12 @@ impl DfTract {
         )?;
         let df_dec =
             init_df_decoder_from_read(&mut Cursor::new(dfp.df_dec), model_cfg, df_cfg, ch)?;
-        let enc = SimpleState::new(&enc.into_runnable()?)?;
-        let erb_dec = SimpleState::new(&erb_dec.into_runnable()?)?;
-        let df_dec = SimpleState::new(&df_dec.into_runnable()?)?;
+        let enc_plan = enc.into_runnable()?;
+        let enc = SimpleState::new(&enc_plan)?;
+        let erb_dec_plan = erb_dec.into_runnable()?;
+        let erb_dec = SimpleState::new(&erb_dec_plan)?;
+        let df_dec_plan = df_dec.into_runnable()?;
+        let df_dec = SimpleState::new(&df_dec_plan)?;
         #[cfg(feature = "timings")]
         let t1 = Instant::now();
 

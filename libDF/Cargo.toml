@@ -128,7 +128,7 @@ tract-hir = { version = "0.23", optional = true }
 flate2 = { version = "1.1", optional = true }
 tar = { version = "0.4", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
-getrandom = { version = "0.2", features = ["js"], optional = true }
+getrandom = { version = "0.4", features = ["wasm_js"], optional = true }
 console_error_panic_hook = { version = "0.1.1", optional = true }
 js-sys = { version = "0.3", optional = true }
 
