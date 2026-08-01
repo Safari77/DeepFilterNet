@@ -23,3 +23,6 @@ lto = "thin"
 inherits = "release"
 lto = "fat"
 panic = "abort"
+
+[workspace.dependencies]
+ndarray = { version = "0.17", features = ["serde"] }

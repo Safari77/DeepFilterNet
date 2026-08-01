@@ -1,16 +1,16 @@
-use std::cell::{RefCell, UnsafeCell};
-use std::rc::Rc;
-use std::thread_local;
-
-use ndarray_rand::rand::distr::{
+use ndarray::{ArrayBase, DataOwned, Dimension, ShapeBuilder};
+use rand::distr::{
     uniform::{SampleUniform, Uniform},
     Distribution,
 };
-use ndarray_rand::rand::{Rng, RngCore};
+use rand::{Rng, RngCore};
 use rand_xoshiro::rand_core::SeedableRng;
+use std::cell::{RefCell, UnsafeCell};
+use std::rc::Rc;
+use std::thread_local;
 // rand_xoshiro 0.8 uses rand_core 0.10, where next_u32/next_u64/fill_bytes live on
 // the `Rng` trait. Import it anonymously to bring those methods into scope without
-// clashing with rand 0.9's `Rng` (imported above via ndarray_rand::rand).
+// clashing with rand 0.9's `Rng` (imported above via rand).
 use rand_xoshiro::rand_core::Rng as _;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use thiserror::Error;
@@ -26,7 +26,7 @@ pub enum UtilsError {
     #[error("Could not inititalize logger")]
     SetLoggerError(#[from] log::SetLoggerError),
     #[error("Could not create uniform distribution")]
-    UniformError(#[from] ndarray_rand::rand::distr::uniform::Error),
+    UniformError(#[from] rand::distr::uniform::Error),
 }
 
 pub struct SeededRng {
@@ -98,4 +98,44 @@ where
         *x = dist.sample(&mut rng);
     }
     Ok(v)
+}
+
+pub trait RandomExt<S, D, A>
+where
+    S: DataOwned<Elem = A>,
+    D: Dimension,
+{
+    fn random<Sh, IdS>(shape: Sh, distribution: IdS) -> ArrayBase<S, D>
+    where
+        IdS: Distribution<A>,
+        Sh: ShapeBuilder<Dim = D>;
+
+    fn random_using<Sh, IdS, R>(shape: Sh, distribution: IdS, rng: &mut R) -> ArrayBase<S, D>
+    where
+        IdS: Distribution<A>,
+        Sh: ShapeBuilder<Dim = D>,
+        R: Rng + ?Sized;
+}
+
+impl<S, A, D> RandomExt<S, D, A> for ArrayBase<S, D>
+where
+    S: DataOwned<Elem = A>,
+    D: Dimension,
+{
+    fn random<Sh, IdS>(shape: Sh, distribution: IdS) -> ArrayBase<S, D>
+    where
+        IdS: Distribution<A>,
+        Sh: ShapeBuilder<Dim = D>,
+    {
+        Self::random_using(shape, distribution, &mut rand::rng())
+    }
+
+    fn random_using<Sh, IdS, R>(shape: Sh, distribution: IdS, rng: &mut R) -> ArrayBase<S, D>
+    where
+        IdS: Distribution<A>,
+        Sh: ShapeBuilder<Dim = D>,
+        R: Rng + ?Sized,
+    {
+        Self::from_shape_simple_fn(shape, move || distribution.sample(rng))
+    }
 }

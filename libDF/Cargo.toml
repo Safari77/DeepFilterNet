@@ -36,7 +36,8 @@ transforms = ["dep:thiserror", "dep:ndarray", "dep:rubato"]
 dataset = [
   "dep:thiserror",
   "dep:ndarray",
-  "dep:ndarray-rand",
+  "dep:rand",
+  "dep:rand_distr",
   "dep:rand_xoshiro",
   "dep:hdf5",
   "dep:rayon",
@@ -59,7 +60,6 @@ bin = [
   "dep:ctrlc",
   "dep:env_logger",
   "dep:rand",
-  "dep:ndarray-rand",
   "dep:rust-ini",
   "logging",
 ]
@@ -96,10 +96,11 @@ hdf5-static = ["hdf5?/static"]
 [dependencies]
 rustfft = { version = "6.1", features = ["wasm_simd"] }
 realfft = { version = "3.5", features = ["wasm_simd"] }
-itertools = "0.12"
+itertools = "0.14"
 num-complex = { version = "^0.4", features = ["serde"] }
 log = { version = "0.4", features = ["std"], optional = true }
 rand = { version = "0.9", optional = true }
+rand_distr = { version = "0.5", optional = true }
 rubato = { version = "3", optional = true }
 audioadapter-buffers = "3.0"
 roots = { version = "0.0.8", optional = true }
@@ -109,8 +110,7 @@ anyhow = { version = "1.0", optional = true, features = ["backtrace"] }
 ctrlc = { version = "3.2", optional = true }
 hound = { version = "3.4", optional = true }
 hdf5 = { optional = true, package = "hdf5-metno", version = "0.12" }
-ndarray = { version = "0.17", optional = true, features = ["serde"] }
-ndarray-rand = { version = "0.16", optional = true }
+ndarray = { workspace = true, optional = true }
 rayon = { version = "1.5", optional = true }
 crossbeam-channel = { version = "^0.5", optional = true }
 serde_json = { version = "1.0", optional = true }
@@ -136,7 +136,6 @@ js-sys = { version = "0.3", optional = true }
 jemallocator = { version = "0.5.0", optional = true }
 
 [dev-dependencies]
-rand = "0.8"
 rstest = "0.26"
 env_logger = "0.11"
 log = { version = "0.4", features = ["std"] }

@@ -36,7 +36,7 @@ deep_filter = { path = "../libDF/", default-features = false, features = [
   "use-jemalloc",
   "default-model",
 ] }
-ndarray = "^0.15"
+ndarray = { workspace = true, optional = true }
 rubato = "1.0"
 ringbuf = "0.3"
 env_logger = "0.10"

@@ -4,13 +4,14 @@ use std::ops::Range;
 use std::time::Instant;
 
 use ndarray::{concatenate, prelude::*, Slice};
-use ndarray_rand::rand::{prelude::IteratorRandom, Rng};
-use ndarray_rand::{rand_distr::Normal, rand_distr::Uniform, RandomExt};
+use rand::{prelude::IteratorRandom, Rng};
+use rand_distr::{Normal, Uniform};
 use thiserror::Error;
 
 use self::BiquadFilter::*;
 use crate::transforms::*;
 pub use crate::util::seed_from_u64;
+use crate::util::RandomExt;
 use crate::util::*;
 use crate::*;
 
