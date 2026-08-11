@@ -19,25 +19,26 @@ default-model-ll = ["deep_filter/default-model-ll"]
 thresholds = []
 
 [dependencies]
-iced = { version = "0.12", features = [
+iced = { version = "0.14", features = [
   "image",
   "debug",
   "tokio",
   "lazy",
 ], optional = true }
-itertools = "0.12"
+itertools = "0.14"
 crossbeam-channel = "0.5"
-image_rs = { package = "image", version = "0.24", optional = true }
+image_rs = { package = "image", version = "0.25", optional = true }
 anyhow = "1.0"
-cpal = "0.15"
+pipewire = "0.10"
 clap = { version = "4.0", features = ["derive"] }
 deep_filter = { path = "../libDF/", default-features = false, features = [
   "tract",
   "use-jemalloc",
   "default-model",
 ] }
-ndarray = { workspace = true, optional = true }
-rubato = "1.0"
-ringbuf = "0.3"
+ndarray = { workspace = true }
+rubato = "5"
+audioadapter-buffers = "5"
+ringbuf = "0.5"
 env_logger = "0.10"
 log = { version = "0.4", features = ["std"] }

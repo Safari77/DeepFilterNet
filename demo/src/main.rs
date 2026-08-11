@@ -2,18 +2,15 @@ use std::env;
 use std::future::Future;
 use std::path::PathBuf;
 use std::process::exit;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::sleep;
 use std::time::Duration;
 
 use clap::{Parser, ValueHint};
 use crossbeam_channel::unbounded;
-use iced::widget::{self, column, container, image, row, slider, text, Container, Image};
-use iced::{
-    alignment, executor, Alignment, Application, Command, ContentFit, Element, Length, Settings,
-    Subscription, Theme,
-};
-use image_rs::{imageops, Rgba, RgbaImage};
+use iced::widget::{self, Container, Image, column, container, image, row, slider, text};
+use iced::{Alignment, ContentFit, Element, Length, Subscription, Task, alignment};
+use image_rs::{Rgba, RgbaImage, imageops};
 
 mod capture;
 mod cmap;
@@ -51,8 +48,8 @@ pub fn main() -> iced::Result {
         5 => log::LevelFilter::Debug,
         _ => log::LevelFilter::Trace,
     };
-    if args.model.is_some() {
-        unsafe { MODEL_PATH = args.model }
+    if let Some(model) = args.model {
+        *MODEL_PATH.lock().expect("Failed to lock MODEL_PATH") = Some(model);
     }
 
     capture::INIT_LOGGER.call_once(|| {
@@ -73,11 +70,22 @@ pub fn main() -> iced::Result {
             .init();
     });
 
-    SpecView::run(Settings::default())
+    iced::application(SpecView::new, SpecView::update, SpecView::view)
+        .title("DeepFilterNet Demo")
+        .subscription(SpecView::subscription)
+        .run()
 }
 
-static mut SPEC_NOISY: Option<Arc<Mutex<SpecImage>>> = None;
-static mut SPEC_ENH: Option<Arc<Mutex<SpecImage>>> = None;
+static SPEC_NOISY: OnceLock<Arc<Mutex<SpecImage>>> = OnceLock::new();
+static SPEC_ENH: OnceLock<Arc<Mutex<SpecImage>>> = OnceLock::new();
+
+fn spec_noisy() -> Arc<Mutex<SpecImage>> {
+    SPEC_NOISY.get().expect("SPEC_NOISY not initialized").clone()
+}
+
+fn spec_enh() -> Arc<Mutex<SpecImage>> {
+    SPEC_ENH.get().expect("SPEC_ENH not initialized").clone()
+}
 
 struct SpecView {
     df_worker: DeepFilterCapture,
@@ -158,17 +166,12 @@ impl SpecImage {
     }
     fn image_handle(&self) -> image::Handle {
         let imt_buf = imageops::rotate270(&self.im).as_raw().to_vec();
-        image::Handle::from_pixels(self.n_frames, self.n_freqs, imt_buf)
+        image::Handle::from_rgba(self.n_frames, self.n_freqs, imt_buf)
     }
 }
 
-impl Application for SpecView {
-    type Executor = executor::Default;
-    type Message = Message;
-    type Theme = Theme;
-    type Flags = ();
-
-    fn new(_flags: ()) -> (Self, Command<Message>) {
+impl SpecView {
+    fn new() -> (Self, Task<Message>) {
         let (s_lsnr, r_lsnr) = unbounded();
         let (s_noisy, r_noisy) = unbounded();
         let (s_enh, r_enh) = unbounded();
@@ -187,14 +190,16 @@ impl Application for SpecView {
         let w = (df_worker.sr / df_worker.frame_size * 10) as u32;
         let freq_res = df_worker.sr / 2 / (df_worker.freq_size - 1);
         let h = (8000 / freq_res) as u32;
-        let (noisy_img, enh_img) = unsafe {
-            SPEC_NOISY = Some(Arc::new(Mutex::new(SpecImage::new(w, h, -100., -10.))));
-            SPEC_ENH = Some(Arc::new(Mutex::new(SpecImage::new(w, h, -100., -10.))));
-            (
-                SPEC_NOISY.as_ref().unwrap().lock().unwrap().image_handle(),
-                SPEC_ENH.as_ref().unwrap().lock().unwrap().image_handle(),
-            )
-        };
+        let noisy = Arc::new(Mutex::new(SpecImage::new(w, h, -100., -10.)));
+        let enh = Arc::new(Mutex::new(SpecImage::new(w, h, -100., -10.)));
+        let (noisy_img, enh_img) = (
+            noisy.lock().unwrap().image_handle(),
+            enh.lock().unwrap().image_handle(),
+        );
+        SPEC_NOISY
+            .set(noisy)
+            .unwrap_or_else(|_| panic!("SPEC_NOISY already initialized"));
+        SPEC_ENH.set(enh).unwrap_or_else(|_| panic!("SPEC_ENH already initialized"));
         (
             Self {
                 df_worker,
@@ -211,19 +216,11 @@ impl Application for SpecView {
                 noisy_img,
                 enh_img,
             },
-            Command::none(),
+            Task::none(),
         )
     }
 
-    fn title(&self) -> String {
-        "DeepFilterNet Demo".to_string()
-    }
-
-    // fn theme(&self) -> Self::Theme {
-    //     Theme::Dark
-    // }
-
-    fn update(&mut self, message: Message) -> Command<Message> {
+    fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::None => (),
             Message::Exit => {
@@ -233,36 +230,23 @@ impl Application for SpecView {
             Message::Tick => {
                 let mut commands = Vec::new();
                 if let Some(task) = self.update_lsnr() {
-                    commands.push(Command::perform(task, move |message| message))
+                    commands.push(Task::perform(task, move |message| message))
                 }
                 if let Some(task) = self.update_noisy() {
-                    commands.push(Command::perform(task, move |message| message))
+                    commands.push(Task::perform(task, move |message| message))
                 }
                 if let Some(task) = self.update_enh() {
-                    commands.push(Command::perform(task, move |message| message))
+                    commands.push(Task::perform(task, move |message| message))
                 }
-                return Command::batch(commands);
+                return Task::batch(commands);
             }
             Message::LsnrChanged(lsnr) => self.lsnr = lsnr,
             Message::NoisyChanged => {
-                self.noisy_img = unsafe {
-                    SPEC_NOISY
-                        .as_ref()
-                        .unwrap()
-                        .lock()
-                        .expect("Failed to lock SPEC_NOISY")
-                        .image_handle()
-                };
+                self.noisy_img =
+                    spec_noisy().lock().expect("Failed to lock SPEC_NOISY").image_handle();
             }
             Message::EnhChanged => {
-                self.enh_img = unsafe {
-                    SPEC_ENH
-                        .as_ref()
-                        .unwrap()
-                        .lock()
-                        .expect("Failed to lock SPEC_ENH")
-                        .image_handle()
-                };
+                self.enh_img = spec_enh().lock().expect("Failed to lock SPEC_ENH").image_handle();
             }
             Message::AttenLimChanged(v) => {
                 self.atten_lim = v;
@@ -295,15 +279,17 @@ impl Application for SpecView {
                     .expect("Failed to send DfControl")
             }
         }
-        Command::none()
+        Task::none()
     }
 
-    fn view(&self) -> Element<Message> {
-        let content = column![row![
-            text("DeepFilterNet Demo").size(40).width(Length::Fill),
-            button("exit").on_press(Message::Exit)
-        ]
-        .width(1000),];
+    fn view(&self) -> Element<'_, Message> {
+        let content = column![
+            row![
+                text("DeepFilterNet Demo").size(40).width(Length::Fill),
+                button("exit").on_press(Message::Exit)
+            ]
+            .width(1000.0),
+        ];
         #[cfg(feature = "thresholds")]
         let content = {
             content
@@ -313,7 +299,7 @@ impl Application for SpecView {
                     -15.,
                     35.,
                     Message::MinThreshDbChanged,
-                    1000,
+                    1000.0,
                     0,
                     3.,
                 ))
@@ -323,17 +309,17 @@ impl Application for SpecView {
                     -15.,
                     35.,
                     Message::MaxErbThreshDbChanged,
-                    1000,
+                    1000.0,
                     0,
                     3.,
                 ))
                 .push(slider_view(
-                    "Threshold DF  Max [dB]",
+                    "Threshold DF Max [dB]",
                     self.max_dfthreshdb,
                     -15.,
                     35.,
                     Message::MaxDfThreshDbChanged,
-                    1000,
+                    1000.0,
                     0,
                     3.,
                 ))
@@ -345,7 +331,7 @@ impl Application for SpecView {
                 0.,
                 100.,
                 Message::AttenLimChanged,
-                1000,
+                1000.0,
                 0,
                 3.,
             ))
@@ -355,7 +341,7 @@ impl Application for SpecView {
                 0.,
                 1.,
                 Message::PostFilterChanged,
-                1000,
+                1000.0,
                 3,
                 0.001,
             ))
@@ -365,28 +351,27 @@ impl Application for SpecView {
                     text("Current SNR:").size(18),
                     text(format!("{:>5.1} dB", self.lsnr))
                         .size(18)
-                        .width(80)
-                        .horizontal_alignment(alignment::Horizontal::Right)
+                        .width(80.0)
+                        .align_x(alignment::Horizontal::Right)
+                        .align_y(alignment::Vertical::Top),
                 ]
-                .spacing(20)
-                .align_items(Alignment::End),
+                .spacing(20.0)
+                .align_y(Alignment::End),
             );
 
         container(content)
-            .padding(50)
+            .padding(50.0)
             .width(Length::Fill)
             .height(Length::Fill)
-            .center_x()
-            .center_y()
+            .align_x(alignment::Horizontal::Center)
+            .align_y(alignment::Vertical::Center)
             .into()
     }
 
     fn subscription(&self) -> Subscription<Message> {
         iced::time::every(std::time::Duration::from_millis(20)).map(|_| Message::Tick)
     }
-}
 
-impl SpecView {
     fn update_lsnr(&mut self) -> Option<impl Future<Output = Message>> {
         if self.r_lsnr.is_empty() {
             return None;
@@ -414,13 +399,10 @@ impl SpecView {
             return None;
         }
         let recv = self.r_noisy.clone();
+        let spec = spec_noisy();
         Some(async move {
             let n = recv.len();
-            unsafe {
-                let mut spec =
-                    SPEC_NOISY.as_mut().unwrap().lock().expect("Failed to lock SPEC_NOISY");
-                spec.update(recv.iter().take(n), n);
-            }
+            spec.lock().expect("Failed to lock SPEC_NOISY").update(recv.iter().take(n), n);
             Message::NoisyChanged
         })
     }
@@ -430,24 +412,33 @@ impl SpecView {
             return None;
         }
         let recv = self.r_enh.clone();
+        let spec = spec_enh();
         Some(async move {
             let n = recv.len();
-            unsafe {
-                let mut spec = SPEC_ENH.as_mut().unwrap().lock().expect("Failed to lock SPEC_ENH");
-                spec.update(recv.iter().take(n), n);
-            }
+            spec.lock().expect("Failed to lock SPEC_ENH").update(recv.iter().take(n), n);
             Message::EnhChanged
         })
     }
-    fn specs(&self) -> Container<Message> {
+
+    fn specs(&self) -> Container<'_, Message> {
         container(column![
-            spec_view("Noisy", self.noisy_img.clone(), 1000, 250),
-            spec_view("DeepFilterNet Enhanced", self.enh_img.clone(), 1000, 250),
+            spec_view("Noisy", self.noisy_img.clone(), 1000.0, 250.0),
+            spec_view(
+                "DeepFilterNet Enhanced",
+                self.enh_img.clone(),
+                1000.0,
+                250.0
+            ),
         ])
     }
 }
 
-fn spec_view(title: &str, im: image::Handle, width: u16, height: u16) -> Element<Message> {
+fn spec_view<'a>(
+    title: &'a str,
+    im: image::Handle,
+    width: f32,
+    height: f32,
+) -> Element<'a, Message> {
     column![
         text(title).size(24).width(Length::Fill),
         spec_raw(im, width, height)
@@ -456,23 +447,24 @@ fn spec_view(title: &str, im: image::Handle, width: u16, height: u16) -> Element
     .width(Length::Fill)
     .into()
 }
-fn spec_raw<'a>(im: image::Handle, width: u16, height: u16) -> Container<'a, Message> {
+
+fn spec_raw<'a>(im: image::Handle, width: f32, height: f32) -> Container<'a, Message> {
     container(Image::new(im).width(width).height(height).content_fit(ContentFit::Fill))
         .max_width(width)
         .max_height(height)
         .width(Length::Fill)
-        .center_x()
-        .center_y()
+        .align_x(alignment::Horizontal::Center)
+        .align_y(alignment::Vertical::Center)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn slider_view<'a>(
-    title: &str,
+    title: &'a str,
     value: f32,
     min: f32,
     max: f32,
     message: impl Fn(f32) -> Message + 'a,
-    width: u16,
+    width: f32,
     precision: usize,
     step: f32,
 ) -> Element<'a, Message> {
@@ -482,9 +474,9 @@ fn slider_view<'a>(
             container(slider(min..=max, value, message).step(step)).width(Length::Fill),
             text(format!("{:.precision$}", value))
                 .size(18)
-                .width(100)
-                .horizontal_alignment(alignment::Horizontal::Right)
-                .vertical_alignment(alignment::Vertical::Top),
+                .width(100.0)
+                .align_x(alignment::Horizontal::Right)
+                .align_y(alignment::Vertical::Top),
         ]
     ]
     .max_width(width)

@@ -389,7 +389,7 @@ pub fn resample(
     // 1. Initialize
     // 'new' returns ResamplerConstructionError. TransformError can't wrap this.
     // Since this is a static config error, we panic with expect() if it fails.
-    let mut resampler = Fft::<f32>::new(sr, new_sr, chunk_size, 2, channels, FixedSync::Both)
+    let mut resampler = Fft::<f32>::new(sr, new_sr, chunk_size, channels, FixedSync::Both)
         .expect("Failed to initialize resampler with provided sample rates");
 
     let chunk_size = resampler.input_frames_max();

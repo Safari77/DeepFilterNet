@@ -1,26 +1,28 @@
 use std::env;
-use std::fmt::Display;
-use std::io::{self, stdout, Write};
-use std::mem::MaybeUninit;
+use std::io::{self, Write, stdout};
 use std::path::PathBuf;
 use std::sync::{
+    Arc, Mutex, MutexGuard, Once,
     atomic::{AtomicBool, Ordering},
-    Arc, Once,
 };
-use std::thread::{self, sleep, JoinHandle};
+use std::thread::{self, JoinHandle, sleep};
 use std::time::Duration;
 
 use anyhow::Result;
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{BufferSize, Device, SampleRate, Stream, StreamConfig, SupportedStreamConfigRange};
-use crossbeam_channel::{unbounded, Receiver, Sender};
-use df::{tract::*, Complex32};
+use crossbeam_channel::{Receiver, Sender, unbounded};
+use df::{Complex32, tract::*};
 use ndarray::prelude::*;
-use ringbuf::{producer::PostponedProducer, Consumer, HeapRb, SharedRb};
-use rubato::{FftFixedIn, FftFixedOut, Resampler};
+use pipewire as pw;
+use pw::properties::properties;
+use pw::spa;
+use ringbuf::traits::*;
+use ringbuf::{HeapCons, HeapProd, HeapRb};
+use rubato::audioadapter_buffers::direct::InterleavedSlice;
+use rubato::{Fft, FixedSync, Resampler};
+use spa::pod::Pod;
 
-pub type RbProd = PostponedProducer<f32, Arc<SharedRb<f32, Vec<MaybeUninit<f32>>>>>;
-pub type RbCons = Consumer<f32, Arc<SharedRb<f32, Vec<MaybeUninit<f32>>>>>;
+pub type RbProd = HeapProd<f32>;
+pub type RbCons = HeapCons<f32>;
 pub type SendLsnr = Sender<f32>;
 pub type RecvLsnr = Receiver<f32>;
 pub type SendSpec = Sender<Box<[f32]>>;
@@ -29,20 +31,35 @@ pub type SendControl = Sender<(DfControl, f32)>;
 pub type RecvControl = Receiver<(DfControl, f32)>;
 
 pub(crate) static INIT_LOGGER: Once = Once::new();
-pub(crate) static mut MODEL_PATH: Option<PathBuf> = None;
-static mut MODEL: Option<DfTract> = None;
+pub(crate) static MODEL_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+struct GlobalModel(Mutex<Option<DfTract>>);
+// SAFETY: `DfTract` is not `Send`/`Sync` on its own (libDF itself relies on it
+// being transferable across threads, see `unsafe impl Send for SendError`).
+// Here the model is initialized once on the main thread *before* the worker
+// thread is spawned, every access is serialized through the Mutex, and the
+// worker only ever touches its own `clone()`. Nothing accesses the stored
+// instance concurrently.
+unsafe impl Sync for GlobalModel {}
+static MODEL: GlobalModel = GlobalModel(Mutex::new(None));
 
-const SAMPLE_FORMAT: cpal::SampleFormat = cpal::SampleFormat::F32;
+fn model() -> MutexGuard<'static, Option<DfTract>> {
+    MODEL.0.lock().expect("DF model mutex poisoned")
+}
 
 pub struct AudioSink {
-    stream: Option<Stream>,
-    config: StreamConfig,
-    device: Device,
+    sr: u32,
+    channels: u32,
+    device_str: Option<String>,
+    stop_sender: Option<pw::channel::Sender<()>>,
+    thread_handle: Option<JoinHandle<()>>,
 }
+
 pub struct AudioSource {
-    stream: Option<Stream>,
-    config: StreamConfig,
-    device: Device,
+    sr: u32,
+    channels: u32,
+    device_str: Option<String>,
+    stop_sender: Option<pw::channel::Sender<()>>,
+    thread_handle: Option<JoinHandle<()>>,
 }
 
 #[derive(PartialEq)]
@@ -56,14 +73,11 @@ pub enum DfControl {
 
 /// Initialize DF model and returns sample rate, frame size, and number of frequency bins
 fn init_df(model_path: Option<PathBuf>, channels: usize) -> (usize, usize, usize) {
-    unsafe {
-        if let Some(m) = MODEL.as_ref() {
-            if m.ch == channels {
-                return (m.sr, m.hop_size, m.n_freqs);
-            }
+    if let Some(m) = model().as_ref() {
+        if m.ch == channels {
+            return (m.sr, m.hop_size, m.n_freqs);
         }
     }
-    // let df_params = DfParams::default();
     let df_params = if let Some(path) = model_path {
         DfParams::new(path).expect("Failed to read DF model")
     } else {
@@ -72,150 +86,164 @@ fn init_df(model_path: Option<PathBuf>, channels: usize) -> (usize, usize, usize
     let r_params = RuntimeParams::default_with_ch(channels);
     let df = DfTract::new(df_params, &r_params).expect("Could not initialize DeepFilter runtime");
     let (sr, frame_size, freq_size) = (df.sr, df.hop_size, df.n_freqs);
-    unsafe { MODEL = Some(df) };
+    *model() = Some(df);
     (sr, frame_size, freq_size)
-}
-
-unsafe fn get_frame_size() -> usize {
-    let df = MODEL.clone().unwrap();
-    df.hop_size
-}
-
-#[derive(Clone, Copy)]
-enum StreamDirection {
-    Input,
-    Output,
-}
-impl Display for StreamDirection {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            StreamDirection::Input => write!(f, "input"),
-            StreamDirection::Output => write!(f, "output"),
-        }
-    }
-}
-
-fn get_all_configs(device: &Device, direction: StreamDirection) -> Vec<SupportedStreamConfigRange> {
-    match direction {
-        StreamDirection::Input => device
-            .supported_input_configs()
-            .expect("Failed to get input configs")
-            .collect::<Vec<SupportedStreamConfigRange>>(),
-        StreamDirection::Output => device
-            .supported_output_configs()
-            .expect("Failed to get output configs")
-            .collect::<Vec<SupportedStreamConfigRange>>(),
-    }
-}
-
-fn get_stream_config(
-    device: &Device,
-    sample_rate: u32,
-    direction: StreamDirection,
-) -> Option<StreamConfig> {
-    let mut configs = Vec::new();
-    let all_configs = get_all_configs(device, direction);
-    for c in all_configs.iter() {
-        if c.channels() == 1 && c.sample_format() == SAMPLE_FORMAT {
-            log::debug!("Found audio {} config: {:?}", direction, &c);
-            configs.push(*c);
-        }
-    }
-    // Further add multi-channel configs if no mono was found. The signal will be downmixed later.
-    for c in all_configs.iter() {
-        if c.channels() >= 2 && c.sample_format() == SAMPLE_FORMAT {
-            log::debug!("Found audio source config: {:?}", &c);
-            configs.push(*c);
-        }
-    }
-    assert!(
-        !configs.is_empty(),
-        "No suitable audio {} config found.",
-        direction
-    );
-    let sr = SampleRate(sample_rate);
-    for c in configs.iter() {
-        if sr >= c.min_sample_rate() && sr <= c.max_sample_rate() {
-            let mut c: StreamConfig = (*c).with_sample_rate(sr).into();
-            c.buffer_size = BufferSize::Fixed(unsafe { get_frame_size() } as u32);
-            return Some(c);
-        }
-    }
-
-    if let Some(c) = configs.first() {
-        let mut c: StreamConfig = (*c).with_max_sample_rate().into();
-        c.buffer_size =
-            BufferSize::Fixed(unsafe { get_frame_size() } as u32 * c.sample_rate.0 / sample_rate);
-        log::warn!("Using best matching config {:?}", c);
-        return Some(c);
-    }
-    None
 }
 
 impl AudioSink {
     fn new(sample_rate: u32, device_str: Option<String>) -> Result<Self> {
-        let host = cpal::default_host();
-        let mut device = host.default_output_device().expect("no output device available");
-        if let Some(device_str) = device_str {
-            for avail_dev in host.output_devices()? {
-                if avail_dev.name()?.to_lowercase().contains(&device_str.to_lowercase()) {
-                    device = avail_dev
-                }
-            }
-        }
-        let config = get_stream_config(&device, sample_rate, StreamDirection::Output)
-            .expect("No suitable audio output config found.");
-
         Ok(Self {
-            stream: None,
-            config,
-            device,
+            sr: sample_rate,
+            channels: 1,
+            device_str,
+            stop_sender: None,
+            thread_handle: None,
         })
     }
+
     fn start(&mut self, mut rb: RbCons) -> Result<()> {
-        let ch = self.config.channels;
-        let needs_upmix = ch > 1;
-        let stream = self.device.build_output_stream(
-            &self.config,
-            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                let len = data.len() / ch as usize;
-                let mut n = 0;
-                if needs_upmix {
-                    let mut data_it = data.chunks_mut(ch as usize);
-                    while n < len {
-                        for (i, o) in rb.pop_iter().zip(&mut data_it) {
-                            o.fill(i);
-                            n += 1;
+        pw::init();
+        let sr = self.sr;
+        let channels = self.channels;
+        let device_str = self.device_str.clone();
+
+        let (tx_stop, rx_stop) = pw::channel::channel::<()>();
+
+        let handle = thread::spawn(move || {
+            let mainloop =
+                pw::main_loop::MainLoopRc::new(None).expect("Failed to create PipeWire main loop");
+            let context = pw::context::ContextRc::new(&mainloop, None)
+                .expect("Failed to create PipeWire context");
+            let core = context.connect_rc(None).expect("Failed to connect to PipeWire core");
+
+            let mainloop_clone = mainloop.clone();
+            let _stop_listener = rx_stop.attach(&mainloop.loop_(), move |_| {
+                mainloop_clone.quit();
+            });
+
+            let mut props = properties! {
+                *pw::keys::MEDIA_TYPE => "Audio",
+                *pw::keys::MEDIA_CATEGORY => "Playback",
+                *pw::keys::MEDIA_ROLE => "Music",
+            };
+            if let Some(ref dev) = device_str {
+                props.insert("target.object", dev.as_str());
+            }
+
+            let stream = pw::stream::StreamBox::new(&core, "deepfilternet-playback", props)
+                .expect("Failed to create PipeWire playback stream");
+
+            let _listener = stream
+                .add_local_listener::<()>()
+                .process(move |stream, _data| {
+                    if let Some(mut buffer) = stream.dequeue_buffer() {
+                        let datas = buffer.datas_mut();
+                        if datas.is_empty() {
+                            return;
+                        }
+                        let data = &mut datas[0];
+                        if let Some(slice) = data.data() {
+                            let max_size = slice.len();
+                            let max_samples = max_size / std::mem::size_of::<f32>();
+                            let max_frames = max_samples / channels as usize;
+                            if max_frames == 0 {
+                                return;
+                            }
+
+                            let pcm_bytes = &mut slice
+                                [..max_frames * channels as usize * std::mem::size_of::<f32>()];
+                            let samples: &mut [f32] = unsafe {
+                                std::slice::from_raw_parts_mut(
+                                    pcm_bytes.as_mut_ptr() as *mut f32,
+                                    max_frames * channels as usize,
+                                )
+                            };
+
+                            let mut n = 0;
+                            if channels > 1 {
+                                let mut data_it = samples.chunks_mut(channels as usize);
+                                while n < max_frames {
+                                    for (i, o) in rb.pop_iter().zip(&mut data_it) {
+                                        o.fill(i);
+                                        n += 1;
+                                    }
+                                }
+                            } else {
+                                while n < max_frames {
+                                    let popped = rb.pop_slice(&mut samples[n..max_frames]);
+                                    if popped == 0 {
+                                        samples[n..max_frames].fill(0.0);
+                                        break;
+                                    }
+                                    n += popped;
+                                }
+                            }
+
+                            let bytes_len =
+                                max_frames * channels as usize * std::mem::size_of::<f32>();
+                            let raw = data.chunk_mut() as *mut _ as *mut spa::sys::spa_chunk;
+                            unsafe {
+                                (*raw).offset = 0;
+                                (*raw).size = bytes_len as u32;
+                                (*raw).stride =
+                                    (channels as usize * std::mem::size_of::<f32>()) as i32;
+                            }
                         }
                     }
-                } else {
-                    while n < len {
-                        n += rb.pop_slice(&mut data[n..]);
-                    }
-                }
-                debug_assert_eq!(n, len);
-                if log::log_enabled!(log::Level::Trace) {
-                    log::trace!(
-                        "Returning data to audio sink with len: {}, rms: {}",
-                        len,
-                        df::rms(data.iter())
-                    );
-                }
-            },
-            move |err| log::error!("Error during audio output {:?}", err),
-            None, // None=blocking, Some(Duration)=timeout
-        )?;
-        stream.play()?;
-        log::info!("Starting playback stream on device {}", self.device.name()?);
-        self.stream = Some(stream);
+                })
+                .register()
+                .expect("Failed to register listener");
+
+            let mut audio_info = spa::param::audio::AudioInfoRaw::new();
+            audio_info.set_format(spa::param::audio::AudioFormat::F32LE);
+            audio_info.set_channels(channels);
+            audio_info.set_rate(sr);
+
+            let obj = pw::spa::pod::Object {
+                type_: pw::spa::utils::SpaTypes::ObjectParamFormat.as_raw(),
+                id: pw::spa::param::ParamType::EnumFormat.as_raw(),
+                properties: audio_info.into(),
+            };
+            let values: Vec<u8> = pw::spa::pod::serialize::PodSerializer::serialize(
+                std::io::Cursor::new(Vec::new()),
+                &pw::spa::pod::Value::Object(obj),
+            )
+            .expect("Failed to serialize SPA pod")
+            .0
+            .into_inner();
+
+            let mut params = [Pod::from_bytes(&values).expect("Failed to parse Pod from bytes")];
+
+            stream
+                .connect(
+                    spa::utils::Direction::Output,
+                    None,
+                    pw::stream::StreamFlags::AUTOCONNECT
+                        | pw::stream::StreamFlags::MAP_BUFFERS
+                        | pw::stream::StreamFlags::RT_PROCESS,
+                    &mut params,
+                )
+                .expect("Failed to connect PipeWire playback stream");
+
+            log::info!("Starting playback stream on PipeWire");
+            mainloop.run();
+        });
+
+        self.stop_sender = Some(tx_stop);
+        self.thread_handle = Some(handle);
         Ok(())
     }
+
     fn sr(&self) -> u32 {
-        self.config.sample_rate.0
+        self.sr
     }
+
     fn pause(&mut self) -> Result<()> {
-        if let Some(s) = self.stream.as_mut() {
-            s.pause()?;
+        if let Some(tx) = self.stop_sender.take() {
+            let _ = tx.send(());
+        }
+        if let Some(handle) = self.thread_handle.take() {
+            let _ = handle.join();
         }
         Ok(())
     }
@@ -223,66 +251,137 @@ impl AudioSink {
 
 impl AudioSource {
     fn new(sample_rate: u32, device_str: Option<String>) -> Result<Self> {
-        let host = cpal::default_host();
-        let mut device = host.default_input_device().expect("no output device available");
-        if let Some(device_str) = device_str {
-            for avail_dev in host.input_devices()? {
-                if avail_dev.name()?.to_lowercase().contains(&device_str.to_lowercase()) {
-                    device = avail_dev
-                }
-            }
-        }
-        let config = get_stream_config(&device, sample_rate, StreamDirection::Input)
-            .expect("No suitable audio input config found.");
-
         Ok(Self {
-            stream: None,
-            config,
-            device,
+            sr: sample_rate,
+            channels: 1,
+            device_str,
+            stop_sender: None,
+            thread_handle: None,
         })
     }
+
     fn start(&mut self, mut rb: RbProd) -> Result<()> {
-        let ch = self.config.channels;
-        let needs_downmix = ch > 1;
-        let stream = self.device.build_input_stream(
-            &self.config,
-            move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                let len = data.len() / ch as usize;
-                if log::log_enabled!(log::Level::Trace) {
-                    log::trace!(
-                        "Got data from audio source with len: {}, rms: {}",
-                        len,
-                        df::rms(data.iter())
-                    );
-                }
-                let mut n = 0;
-                if needs_downmix {
-                    let mut iter = data.chunks(ch as usize).map(df::mean);
-                    while n < len {
-                        n += rb.push_iter(&mut iter);
+        pw::init();
+        let sr = self.sr;
+        let channels = self.channels;
+        let device_str = self.device_str.clone();
+
+        let (tx_stop, rx_stop) = pw::channel::channel::<()>();
+
+        let handle = thread::spawn(move || {
+            let mainloop =
+                pw::main_loop::MainLoopRc::new(None).expect("Failed to create PipeWire main loop");
+            let context = pw::context::ContextRc::new(&mainloop, None)
+                .expect("Failed to create PipeWire context");
+            let core = context.connect_rc(None).expect("Failed to connect to PipeWire core");
+
+            let mainloop_clone = mainloop.clone();
+            let _stop_listener = rx_stop.attach(&mainloop.loop_(), move |_| {
+                mainloop_clone.quit();
+            });
+
+            let mut props = properties! {
+                *pw::keys::MEDIA_TYPE => "Audio",
+                *pw::keys::MEDIA_CATEGORY => "Capture",
+                *pw::keys::MEDIA_ROLE => "Music",
+            };
+            if let Some(ref dev) = device_str {
+                props.insert("target.object", dev.as_str());
+            }
+
+            let stream = pw::stream::StreamBox::new(&core, "deepfilternet-capture", props)
+                .expect("Failed to create PipeWire capture stream");
+
+            let _listener = stream
+                .add_local_listener::<()>()
+                .process(move |stream, _data| {
+                    if let Some(mut buffer) = stream.dequeue_buffer() {
+                        let datas = buffer.datas_mut();
+                        if datas.is_empty() {
+                            return;
+                        }
+                        let data = &mut datas[0];
+                        let chunk = data.chunk();
+                        let offset = chunk.offset() as usize;
+                        let size = chunk.size() as usize;
+                        if let Some(slice) = data.data() {
+                            if offset + size <= slice.len() {
+                                let pcm_bytes = &slice[offset..offset + size];
+                                let samples: &[f32] = unsafe {
+                                    std::slice::from_raw_parts(
+                                        pcm_bytes.as_ptr() as *const f32,
+                                        pcm_bytes.len() / std::mem::size_of::<f32>(),
+                                    )
+                                };
+                                let len = samples.len() / channels as usize;
+                                let mut n = 0;
+                                if channels > 1 {
+                                    let mut iter = samples.chunks(channels as usize).map(df::mean);
+                                    while n < len {
+                                        n += rb.push_iter(&mut iter);
+                                    }
+                                } else {
+                                    while n < len {
+                                        n += rb.push_slice(&samples[n..]);
+                                    }
+                                }
+                            }
+                        }
                     }
-                } else {
-                    while n < len {
-                        n += rb.push_slice(&data[n..]);
-                    }
-                }
-                rb.sync();
-                debug_assert_eq!(n, len);
-            },
-            move |err| log::error!("Error during audio output {:?}", err),
-            None, // None=blocking, Some(Duration)=timeout
-        )?;
-        log::info!("Starting caputre stream on device {}", self.device.name()?);
-        stream.play()?;
-        self.stream = Some(stream);
+                })
+                .register()
+                .expect("Failed to register listener");
+
+            let mut audio_info = spa::param::audio::AudioInfoRaw::new();
+            audio_info.set_format(spa::param::audio::AudioFormat::F32LE);
+            audio_info.set_channels(channels);
+            audio_info.set_rate(sr);
+
+            let obj = pw::spa::pod::Object {
+                type_: pw::spa::utils::SpaTypes::ObjectParamFormat.as_raw(),
+                id: pw::spa::param::ParamType::EnumFormat.as_raw(),
+                properties: audio_info.into(),
+            };
+            let values: Vec<u8> = pw::spa::pod::serialize::PodSerializer::serialize(
+                std::io::Cursor::new(Vec::new()),
+                &pw::spa::pod::Value::Object(obj),
+            )
+            .expect("Failed to serialize SPA pod")
+            .0
+            .into_inner();
+
+            let mut params = [Pod::from_bytes(&values).expect("Failed to parse Pod from bytes")];
+
+            stream
+                .connect(
+                    spa::utils::Direction::Input,
+                    None,
+                    pw::stream::StreamFlags::AUTOCONNECT
+                        | pw::stream::StreamFlags::MAP_BUFFERS
+                        | pw::stream::StreamFlags::RT_PROCESS,
+                    &mut params,
+                )
+                .expect("Failed to connect PipeWire capture stream");
+
+            log::info!("Starting capture stream on PipeWire");
+            mainloop.run();
+        });
+
+        self.stop_sender = Some(tx_stop);
+        self.thread_handle = Some(handle);
         Ok(())
     }
+
     fn sr(&self) -> u32 {
-        self.config.sample_rate.0
+        self.sr
     }
+
     fn pause(&mut self) -> Result<()> {
-        if let Some(s) = self.stream.as_mut() {
-            s.pause()?;
+        if let Some(tx) = self.stop_sender.take() {
+            let _ = tx.send(());
+        }
+        if let Some(handle) = self.thread_handle.take() {
+            let _ = handle.join();
         }
         Ok(())
     }
@@ -328,8 +427,9 @@ fn get_worker_fn(
     } else {
         (None, None, None)
     };
+
     move || {
-        let mut df = unsafe { MODEL.clone().unwrap() };
+        let mut df = model().as_ref().expect("DF model not initialized").clone();
         debug_assert_eq!(df.ch, 1); // Processing for more channels are not implemented yet
         let mut inframe = Array2::zeros((df.ch, df.hop_size));
         let mut outframe = inframe.clone();
@@ -337,27 +437,29 @@ fn get_worker_fn(
             .expect("Failed to run DeepFilterNet");
         has_init.store(true, Ordering::Relaxed);
         log::info!("Worker init");
+
+        // Input resampler: device sr -> df.sr (flat mono buffer)
         let (mut input_resampler, n_in) = if input_sr != df.sr {
-            let r = FftFixedOut::<f32>::new(input_sr, df.sr, df.hop_size, 1, 1)
+            let r = Fft::<f32>::new(input_sr, df.sr, df.hop_size, 1, FixedSync::Output)
                 .expect("Failed to init input resampler");
             let n_in = r.input_frames_max();
-            let buf = r.input_buffer_allocate(true);
-            (Some((r, buf)), n_in)
+            (Some((r, vec![0.0f32; n_in])), n_in)
         } else {
             (None, df.hop_size)
         };
+
+        // Output resampler: df.sr -> device sr
         let (mut output_resampler, n_out) = if output_sr != df.sr {
-            let r = FftFixedIn::<f32>::new(df.sr, output_sr, df.hop_size, 1, 1)
+            let r = Fft::<f32>::new(df.sr, output_sr, df.hop_size, 1, FixedSync::Input)
                 .expect("Failed to init output resampler");
             let n_out = r.output_frames_max();
-            let buf = r.output_buffer_allocate(true);
-            // let buf = vec![0.; n_out];
-            (Some((r, buf)), n_out)
+            (Some((r, vec![0.0f32; n_out])), n_out)
         } else {
             (None, df.hop_size)
         };
+
         while !should_stop.load(Ordering::Relaxed) {
-            if rb_in.len() < n_in {
+            if rb_in.occupied_len() < n_in {
                 // Sleep for half a hop size
                 sleep(Duration::from_secs_f32(
                     df.hop_size as f32 / df.sr as f32 / 2.,
@@ -365,11 +467,16 @@ fn get_worker_fn(
                 continue;
             }
             if let Some((ref mut r, ref mut buf)) = input_resampler.as_mut() {
-                let n = rb_in.pop_slice(&mut buf[0]);
-                debug_assert_eq!(n, n_in);
-                debug_assert_eq!(n, r.input_frames_next());
-                r.process_into_buffer(buf, &mut [inframe.as_slice_mut().unwrap()], None)
-                    .unwrap();
+                let need = r.input_frames_next(); // varies by ±1 frame with FixedSync::Output
+                let n = rb_in.pop_slice(&mut buf[..need]);
+                debug_assert_eq!(n, need);
+                let in_adapter = InterleavedSlice::new(&buf[..need], 1, need).unwrap();
+                let mut out_adapter =
+                    InterleavedSlice::new_mut(inframe.as_slice_mut().unwrap(), 1, df.hop_size)
+                        .unwrap();
+                let (_read, written) =
+                    r.process_into_buffer(&in_adapter, &mut out_adapter, None).unwrap();
+                debug_assert_eq!(written, df.hop_size);
             } else {
                 let n = rb_in.pop_slice(inframe.as_slice_mut().unwrap());
                 debug_assert_eq!(n, n_in);
@@ -379,18 +486,21 @@ fn get_worker_fn(
                 .expect("Failed to run DeepFilterNet");
             let mut n = 0;
             if let Some((ref mut r, ref mut buf)) = output_resampler.as_mut() {
-                r.process_into_buffer(&[outframe.as_slice().unwrap()], buf, None).unwrap();
-                while n < n_out {
-                    n += rb_out.push_slice(&buf[0][n..]);
+                let in_adapter =
+                    InterleavedSlice::new(outframe.as_slice().unwrap(), 1, df.hop_size).unwrap();
+                let mut out_adapter = InterleavedSlice::new_mut(&mut buf[..], 1, n_out).unwrap();
+                let (_read, written) =
+                    r.process_into_buffer(&in_adapter, &mut out_adapter, None).unwrap();
+                while n < written {
+                    n += rb_out.push_slice(&buf[n..written]);
                 }
             } else {
                 let buf = outframe.as_slice().unwrap();
                 while n < n_out {
                     n += rb_out.push_slice(&buf[n..]);
                 }
+                debug_assert_eq!(n, n_out);
             }
-            debug_assert_eq!(n, n_out);
-            rb_out.sync();
             if let Some(ref mut s_lsnr) = s_lsnr.as_mut() {
                 s_lsnr.send(lsnr).expect("Failed to send to LSNR rb");
             }
@@ -464,8 +574,6 @@ impl DeepFilterCapture {
         let out_rb = HeapRb::<f32>::new(frame_size * 100);
         let (in_prod, in_cons) = in_rb.split();
         let (out_prod, out_cons) = out_rb.split();
-        let in_prod = in_prod.into_postponed();
-        let out_prod = out_prod.into_postponed();
 
         let mut source = AudioSource::new(sr as u32, None)?;
         let mut sink = AudioSink::new(sr as u32, None)?;
@@ -523,7 +631,7 @@ impl DeepFilterCapture {
 }
 
 #[allow(unused)]
-#[allow(unknown_lints)] // assigning_clones is clippy nightly only
+#[allow(unknown_lints)]
 #[allow(clippy::assigning_clones)]
 pub fn main() -> Result<()> {
     INIT_LOGGER.call_once(|| {
@@ -538,10 +646,8 @@ pub fn main() -> Result<()> {
 
     let (lsnr_prod, mut lsnr_cons) = unbounded();
     let mut model_path = env::var("DF_MODEL").ok().map(PathBuf::from);
-    unsafe {
-        if model_path.is_none() && MODEL_PATH.is_some() {
-            model_path = MODEL_PATH.clone()
-        }
+    if model_path.is_none() {
+        model_path = MODEL_PATH.lock().unwrap().clone();
     }
     if let Some(p) = model_path.as_ref() {
         log::info!("Running with model '{:?}'", p);
@@ -551,7 +657,7 @@ pub fn main() -> Result<()> {
     loop {
         sleep(Duration::from_millis(200));
         while let Ok(lsnr) = lsnr_cons.try_recv() {
-            print!("\rCurrent SNR: {:>5.1} dB{esc}[1;", lsnr, esc = 27 as char);
+            print!("\rCurrent SNR: {:>5.1} dB\x1b[K", lsnr);
         }
         stdout().flush().unwrap();
     }

@@ -101,8 +101,8 @@ num-complex = { version = "^0.4", features = ["serde"] }
 log = { version = "0.4", features = ["std"], optional = true }
 rand = { version = "0.9", optional = true }
 rand_distr = { version = "0.5", optional = true }
-rubato = { version = "3", optional = true }
-audioadapter-buffers = "3.0"
+rubato = { version = "5", optional = true }
+audioadapter-buffers = "5"
 roots = { version = "0.0.8", optional = true }
 rand_xoshiro = { version = "0.8", optional = true }
 thiserror = { version = "2", optional = true }
