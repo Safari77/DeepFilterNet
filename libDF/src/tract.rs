@@ -4,10 +4,10 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "timings")]
 use std::time::Instant;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use flate2::read::GzDecoder;
 use ini::Ini;
-use ndarray::{prelude::*, Axis};
+use ndarray::{Axis, prelude::*};
 use tar::Archive;
 use tract_core::internal::tract_itertools::izip;
 use tract_core::internal::tract_smallvec::alloc::collections::VecDeque;
@@ -1083,14 +1083,5 @@ pub fn as_arrayview_mut_complex<'a>(
     }
 }
 pub fn tvalue_to_array_view_mut(x: &mut TValue) -> ArrayViewMutD<'_, f32> {
-    unsafe {
-        match x {
-            TValue::Var(x) => {
-                ArrayViewMutD::from_shape_ptr(x.shape(), x.as_ptr_unchecked::<f32>() as *mut f32)
-            }
-            TValue::Const(x) => {
-                ArrayViewMutD::from_shape_ptr(x.shape(), x.as_ptr_unchecked::<f32>() as *mut f32)
-            }
-        }
-    }
+    unsafe { ArrayViewMutD::from_shape_ptr(x.shape(), x.as_ptr_unchecked::<f32>() as *mut f32) }
 }
