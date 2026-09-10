@@ -2,10 +2,10 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::io::{self, Write};
 use std::sync::{
-    mpsc::{sync_channel, Receiver, SyncSender},
     Arc, Mutex, Once,
+    mpsc::{Receiver, SyncSender, sync_channel},
 };
-use std::thread::{self, sleep, JoinHandle};
+use std::thread::{self, JoinHandle, sleep};
 use std::time::{Duration, Instant};
 
 use df::tract::*;
@@ -68,7 +68,7 @@ const ID_MONO: u64 = 7843795;
 const ID_STEREO: u64 = 7843796;
 static MODEL: Mutex<Option<ModelWrapper>> = Mutex::new(None);
 
-// Wrapper to silence Send/Sync errors. 
+// Wrapper to silence Send/Sync errors.
 // We must protect this with a Mutex at runtime to be actually safe!
 struct ModelWrapper(DfTract);
 
@@ -91,9 +91,9 @@ fn log_format(buf: &mut env_logger::fmt::Formatter, record: &log::Record) -> io:
         buf,
         "{} | {}{}{:#} | {} {}", // Changed format string
         ts,
-        level_style,       // 1. Writes ANSI color code
-        record.level(),    // 2. Writes the actual text (e.g. "INFO")
-        level_style,       // 3. Writes ANSI Reset code (triggered by the :# flag)
+        level_style,    // 1. Writes ANSI color code
+        record.level(), // 2. Writes the actual text (e.g. "INFO")
+        level_style,    // 3. Writes ANSI Reset code (triggered by the :# flag)
         module,
         record.args()
     )
@@ -132,16 +132,23 @@ fn get_worker_fn(
         let mut outframe = Array2::zeros((df.ch, df.hop_size));
         let t_audio_ms = df.hop_size as f32 / df.sr as f32 * 1000.;
         loop {
-            if let Ok((c, v)) = controls.try_recv() {
-                log::info!("DF {} | Setting '{}' to {:.1}", id, c, v);
-                match c {
-                    DfControl::AttenLim => df.set_atten_lim(v),
-                    DfControl::PfBeta => df.set_pf_beta(v),
-                    DfControl::MinThreshDb => df.min_db_thresh = v,
-                    DfControl::MaxErbThreshDb => df.max_db_erb_thresh = v,
-                    DfControl::MaxDfThreshDb => df.max_db_df_thresh = v,
-                    _ => (),
+            match controls.try_recv() {
+                Ok((c, v)) => {
+                    log::info!("DF {} | Setting '{}' to {:.1}", id, c, v);
+                    match c {
+                        DfControl::AttenLim => df.set_atten_lim(v),
+                        DfControl::PfBeta => df.set_pf_beta(v),
+                        DfControl::MinThreshDb => df.min_db_thresh = v,
+                        DfControl::MaxErbThreshDb => df.max_db_erb_thresh = v,
+                        DfControl::MaxDfThreshDb => df.max_db_df_thresh = v,
+                        _ => (),
+                    }
                 }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                Err(std::sync::mpsc::TryRecvError::Empty) => (),
+            }
+            if Arc::strong_count(&inqueue) <= 1 {
+                break;
             }
             let got_samples = {
                 let mut q = inqueue.lock().unwrap();
@@ -197,14 +204,16 @@ fn init_df(channels: usize) -> (usize, usize) {
         }
         // If channels don't match, we fall through to create a new one.
         // The guard is still held, so we are safe to replace it.
-        eprintln!("DeepFilterNet: Re-initializing model for {} channels", channels);
+        eprintln!(
+            "DeepFilterNet: Re-initializing model for {} channels",
+            channels
+        );
     }
 
     // 3. Create the new model
     let df_params = DfParams::default();
     let r_params = RuntimeParams::default_with_ch(channels);
-    let df = DfTract::new(df_params, &r_params)
-        .expect("Could not initialize DeepFilter runtime");
+    let df = DfTract::new(df_params, &r_params).expect("Could not initialize DeepFilter runtime");
 
     let sr = df.sr;
     let hop_size = df.hop_size;
