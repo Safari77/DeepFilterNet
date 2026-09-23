@@ -469,10 +469,10 @@ impl DfTract {
         // Avoid panic in to_scalar if it sees more than one number
         let lsnr_tensor = enc_emb.pop().unwrap();
         let lsnr = if lsnr_tensor.len() == 1 {
-            *lsnr_tensor.try_as_plain()?.to_scalar::<f32>()?
+            *lsnr_tensor.try_as_plain_ram()?.to_scalar::<f32>()?
         } else {
             // If Stereo, average the SNR of both channels
-            let slice = lsnr_tensor.try_as_plain()?.as_slice::<f32>()?;
+            let slice = lsnr_tensor.try_as_plain_ram()?.as_slice::<f32>()?;
             slice.iter().sum::<f32>() / slice.len() as f32
         };
         let c0 = enc_emb.pop().unwrap();
