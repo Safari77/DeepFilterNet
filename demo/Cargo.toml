@@ -40,5 +40,5 @@ ndarray = { workspace = true }
 rubato = "5"
 audioadapter-buffers = "5"
 ringbuf = "0.5"
-env_logger = "0.10"
+env_logger = "0.11"
 log = { version = "0.4", features = ["std"] }
